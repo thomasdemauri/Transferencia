@@ -27,6 +27,8 @@ namespace Client
         {
             var watch = System.Diagnostics.Stopwatch.StartNew();
 
+            var globalCounter = 0;
+
             using (var client = new TcpClient(SERVER, PORT))
             {
                 var stream = client.GetStream();
@@ -35,41 +37,45 @@ namespace Client
 
                 for (int i = 0; i < filesCount; i++)
                 {
-                    await ReadFile(files[i], stream);
+                    globalCounter += await ReadFile(files[i], stream);
                 }
 
                 watch.Stop();
                 Console.WriteLine($"Time taken: {watch.ElapsedMilliseconds / 1000} seconds");
+                Console.WriteLine($"Lines read: {globalCounter}");
             }
         }
 
-        static async Task ReadFile(string file, NetworkStream stream)
+        static async Task<int> ReadFile(string file, NetworkStream stream)
         {
-            var buffer = new byte[32_000];
+            Console.WriteLine($"Starting process file: {file}");
 
-            using (var ms = new MemoryStream(buffer))
+            var counter = 0;
+            var buffer = 0;
+
+            using (var writer = new StreamWriter(stream, Encoding.UTF8, leaveOpen: true))
             using (var reader = new StreamReader(file, Encoding.UTF8))
             {
                 string? line;
                 while ((line = await reader.ReadLineAsync()) != null)
                 {
-                    var lineInBytes = Encoding.UTF8.GetBytes(line + Environment.NewLine);
+                    await writer.WriteLineAsync(line);
+                    counter++;
 
-                    if (ms.Length + lineInBytes.Length > buffer.Length)
+                    buffer += line.Length + 2;
+
+
+                    if (buffer > 32768)
                     {
-                        await stream.WriteAsync(buffer, 0, (int)ms.Length);
-                        ms.Position = 0;
-                        ms.SetLength(0);
+                        await writer.FlushAsync();
+                        buffer = 0;
                     }
-
-                    ms.Write(lineInBytes, 0, lineInBytes.Length);
                 }
 
-                if (ms.Length > 0)
-                {
-                    await stream.WriteAsync(buffer, 0, (int)ms.Length);
-                }
+                await writer.FlushAsync();
             }
+            Console.WriteLine($"Process finished");
+            return counter;
         }
 
         static List<string> GetAllFilesToProcess(string folderPath)
