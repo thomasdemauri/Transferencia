@@ -1,5 +1,4 @@
 ﻿using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.DependencyInjection;
 using System.Data;
 using System.Net;
 using System.Net.Sockets;
@@ -11,6 +10,7 @@ namespace Server
     {
         const int BATCH_SIZE = 10_0000;
         const int BUFFER_SIZE = 4_096;
+        const int MAX_LINE_BUFFER_SIZE = 1024 * 64;
 
         static async Task Main(string[] args)
         {
@@ -49,6 +49,7 @@ namespace Server
                     var accumulator = new StringBuilder();
                     var bytesRead = 0;
 
+                    var lineBuffer = new char[MAX_LINE_BUFFER_SIZE];
                     var entries = new Entry[BATCH_SIZE];
                     var entriesIndex = 0;
 
@@ -61,15 +62,30 @@ namespace Server
                         var newLineAt = 0;
                         var iterator = 0;
 
+
                         while (iterator < accumulator.Length)
                         {
                             if (accumulator[iterator] == '\n' || accumulator[iterator] == '\r')
                             {
                                 newLineAt = iterator;
+                                int length = newLineAt - cursor;
 
-                                if (newLineAt > cursor)
+                                if (length > 0)
                                 {
-                                    ProcessMessage(accumulator.ToString(cursor, newLineAt - cursor));
+                                    accumulator.CopyTo(cursor, lineBuffer, 0, length);
+                                    var lineSpan = new ReadOnlySpan<char>(lineBuffer, 0, length);
+                                    
+                                    if (ProcessMessage(lineSpan) is Entry entry)
+                                    {
+                                        entries[entriesIndex++] = entry;
+
+                                        if (entriesIndex >= BATCH_SIZE)
+                                        {
+                                            await bulkCopy.WriteToServerAsync(ConvertToDataTable(entries, entriesIndex));
+                                            entriesIndex = 0;
+                                        }
+                                    }
+
                                 }
 
                                 cursor = newLineAt + 1;
@@ -87,7 +103,21 @@ namespace Server
 
                     if (accumulator.Length > 0)
                     {
-                        ProcessMessage(accumulator.ToString());
+
+                        accumulator.CopyTo(0, lineBuffer, 0, accumulator.Length);
+
+                        var lineSpan = new ReadOnlySpan<char>(lineBuffer, 0, accumulator.Length);
+
+                        if (ProcessMessage(lineSpan) is Entry entry)
+                        {
+                            entries[entriesIndex++] = entry;
+                        }
+                    }
+
+                    if (entriesIndex > 0)
+                    {
+                        await bulkCopy.WriteToServerAsync(ConvertToDataTable(entries, entriesIndex));
+                        entriesIndex = 0;
                     }
 
                     await connection.CloseAsync();
@@ -100,27 +130,17 @@ namespace Server
             }
         }
 
-        private static DataTable ConvertToDataTable(Entry[] entries)
+        static Entry? ProcessMessage(ReadOnlySpan<char> fullLineSpan)
         {
-            var dataTable = CreateTable();
-
-            foreach (var entry in entries)
+            if (fullLineSpan.IsWhiteSpace())
             {
-                dataTable.Rows.Add(entry.LogDate, entry.Pid, entry.Tid, entry.Level, entry.Component, entry.Content);
+                return null;
             }
 
-            return dataTable;
-        }
-
-        static Entry? ProcessMessage(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message)) return null;
-
             int startIndex = -1;
-
-            for (int i = 0; i < message.Length; i++)
+            for (int i = 0; i < fullLineSpan.Length; i++)
             {
-                if (char.IsDigit(message[i]))
+                if (char.IsDigit(fullLineSpan[i]))
                 {
                     startIndex = i;
                     break;
@@ -132,30 +152,58 @@ namespace Server
                 return null;
             }
 
-            if (message.Length - startIndex < 18)
+            var line = fullLineSpan.Slice(startIndex);
+
+            if (line.Length < 33)
             {
                 return null;
             }
 
-            var cleanMessage = message.Substring(startIndex);
-
-
-            var logDate = cleanMessage.Substring(0, 18);
-            var pid = cleanMessage.Substring(19, 5).TrimStart(); 
-            var tid = cleanMessage.Substring(25, 5).TrimStart();
-            var level = message[31];
-
-            var endRelative = cleanMessage.IndexOf(':', 33);
-            if (endRelative == -1)
+            try
             {
-                endRelative = cleanMessage.IndexOf('>', 33);
+                var logDate = line.Slice(0, 18).ToString();
+                var pidSpan = line.Slice(19, 5).Trim();
+                var tidSpan = line.Slice(25, 5).Trim();
+
+                short pid = short.Parse(pidSpan);
+                short tid = short.Parse(tidSpan);
+
+                var level = line[31];
+
+                var bodyLine = line.Slice(33);
+
+                var separatorComponent = bodyLine.IndexOf(':');
+                if (separatorComponent == -1)
+                {
+                    separatorComponent = bodyLine.IndexOf('>');
+                }
+                if (separatorComponent == -1)
+                {
+                    return null;
+                }
+
+                var component = bodyLine.Slice(0, separatorComponent).ToString();
+                var content = bodyLine.Slice(separatorComponent + 1).ToString().Trim();
+
+
+                return new Entry(logDate, pid, tid, level, component, content);
             }
-            var endAbsolute = endRelative - 33;
+            catch (Exception)
+            {
+                return null;
+            }
+        }
 
-            var component = cleanMessage.Substring(33, endAbsolute);
-            var content = cleanMessage.Substring(33 + 2 + endAbsolute);
+        private static DataTable ConvertToDataTable(Entry[] entries, int entriesIndex)
+        {
+            var dataTable = CreateTable();
 
-            return new Entry(logDate, Int16.Parse(pid) , Int16.Parse(tid), level, component, content);
+            for (int i=0; i<entriesIndex; i++)
+            {
+                dataTable.Rows.Add(entries[i].LogDate, entries[i].Pid, entries[i].Tid, entries[i].Level, entries[i].Component, entries[i].Content);
+            }
+
+            return dataTable;
         }
 
         static DataTable CreateTable()
