@@ -1,4 +1,5 @@
 ﻿using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.DependencyInjection;
 using System.Data;
 using System.Net;
 using System.Net.Sockets;
@@ -8,7 +9,8 @@ namespace Server
 {
     internal class Program
     {
-        public static int BATCH_SIZE = 10_0000;
+        const int BATCH_SIZE = 10_0000;
+        const int BUFFER_SIZE = 4_096;
 
         static async Task Main(string[] args)
         {
@@ -27,7 +29,6 @@ namespace Server
                 var stream = client.GetStream();
                 var linesProcessed = 0;
 
-                using (var reader = new StreamReader(stream, Encoding.UTF8))
                 using (var connection = new SqlConnection(GetConnectionString()))
                 using (var bulkCopy = new SqlBulkCopy(connection)
                 {
@@ -44,43 +45,49 @@ namespace Server
                     bulkCopy.ColumnMappings.Add("Content", "Content");
                     await connection.OpenAsync();
 
-                    string? line;
+                    var currentBuffer = new byte[BUFFER_SIZE];
+                    var accumulator = new StringBuilder();
+                    var bytesRead = 0;
 
                     var entries = new Entry[BATCH_SIZE];
-                    var index = 0;
+                    var entriesIndex = 0;
 
-                    while ((line = await reader.ReadLineAsync()) != null)
+                    while ((bytesRead = await stream.ReadAsync(currentBuffer)) != 0)
                     {
-                        var entry = ProcessMessage(line);
+                        var chunkString = Encoding.UTF8.GetString(currentBuffer, 0, bytesRead);
+                        accumulator.Append(chunkString);
 
-                        if (entry is null)
+                        var cursor = 0;
+                        var newLineAt = 0;
+                        var iterator = 0;
+
+                        while (iterator < accumulator.Length)
                         {
-                            continue;
-                        }
-
-                        entries[index++] = (Entry)entry;
-
-                        linesProcessed++;
-
-                        if (index == BATCH_SIZE)
-                        {
-                            using (var dataTable = ConvertToDataTable(entries))
+                            if (accumulator[iterator] == '\n' || accumulator[iterator] == '\r')
                             {
-                                await bulkCopy.WriteToServerAsync(dataTable);
+                                newLineAt = iterator;
+
+                                if (newLineAt > cursor)
+                                {
+                                    ProcessMessage(accumulator.ToString(cursor, newLineAt - cursor));
+                                }
+
+                                cursor = newLineAt + 1;
                             }
 
-                            Array.Clear(entries);
-                            index = 0;
+                            iterator++;
                         }
+
+                        if (cursor > 0)
+                        {
+                            accumulator.Remove(0, cursor);
+                        }
+
                     }
 
-                    if (index > 0)
+                    if (accumulator.Length > 0)
                     {
-                        linesProcessed++;
-                        using (var dataTable = ConvertToDataTable(entries))
-                        {
-                            await bulkCopy.WriteToServerAsync(dataTable);
-                        }
+                        ProcessMessage(accumulator.ToString());
                     }
 
                     await connection.CloseAsync();
@@ -107,62 +114,36 @@ namespace Server
 
         static Entry? ProcessMessage(string message)
         {
-            //if (message.Length < 18)
-            //{
-            //    return null;
-            //}
-
-            //var startMessage = false;
-            //var index = 0;
-
-            //while (!startMessage && index < message.Length)
-            //{
-            //    startMessage = Char.IsDigit(message[index]);
-            //    index++;
-            //}
-
-            //if (startMessage == false)
-            //{
-            //    return null;
-            //}
-
             if (string.IsNullOrWhiteSpace(message)) return null;
 
             int startIndex = -1;
 
-            // O loop 'for' garante que 'i' nunca vai estourar o tamanho da mensagem
             for (int i = 0; i < message.Length; i++)
             {
                 if (char.IsDigit(message[i]))
                 {
                     startIndex = i;
-                    break; // Encontramos! Para o loop agora.
+                    break;
                 }
             }
 
-            // Se o loop terminou e startIndex continua -1, significa que não tinha nenhum número.
-            // Retorna null para ignorar essa linha de lixo.
             if (startIndex == -1)
             {
                 return null;
             }
 
-            // Verifica se, a partir do número encontrado, tem tamanho suficiente
             if (message.Length - startIndex < 18)
             {
                 return null;
             }
 
-            // Pega a mensagem válida a partir do índice encontrado
-            // Não precisa de Trim aqui porque o IsDigit já pulou os espaços e lixos
-            //var validPart = message.Substring(startIndex);
-
             var cleanMessage = message.Substring(startIndex);
 
+
             var logDate = cleanMessage.Substring(0, 18);
-            var pid = cleanMessage.Substring(19, 5).TrimStart();
+            var pid = cleanMessage.Substring(19, 5).TrimStart(); 
             var tid = cleanMessage.Substring(25, 5).TrimStart();
-            var level = cleanMessage[31];
+            var level = message[31];
 
             var endRelative = cleanMessage.IndexOf(':', 33);
             if (endRelative == -1)

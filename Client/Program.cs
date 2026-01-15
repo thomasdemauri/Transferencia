@@ -7,6 +7,8 @@ namespace Client
     {
         const string SERVER = "127.0.0.1";
         const int    PORT   = 8888;
+        const int    BUFFER_SIZE = 4_096;
+
 
         static async Task Main(string[] args)
         {
@@ -51,29 +53,17 @@ namespace Client
             Console.WriteLine($"Starting process file: {file}");
 
             var counter = 0;
-            var buffer = 0;
+            var currentBuffer = new byte[BUFFER_SIZE];
+            var bytesRead = 0;
 
-            using (var writer = new StreamWriter(stream, Encoding.UTF8, leaveOpen: true))
-            using (var reader = new StreamReader(file, Encoding.UTF8))
+            using (var reader = new FileStream(file, FileMode.Open))
             {
-                string? line;
-                while ((line = await reader.ReadLineAsync()) != null)
+                while ((bytesRead = await reader.ReadAsync(currentBuffer, 0, currentBuffer.Length)) != 0)
                 {
-                    await writer.WriteLineAsync(line);
-                    counter++;
-
-                    buffer += line.Length + 2;
-
-
-                    if (buffer > 32768)
-                    {
-                        await writer.FlushAsync();
-                        buffer = 0;
-                    }
+                    await stream.WriteAsync(currentBuffer, 0, bytesRead);
                 }
-
-                await writer.FlushAsync();
             }
+
             Console.WriteLine($"Process finished");
             return counter;
         }
