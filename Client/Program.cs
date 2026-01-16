@@ -1,5 +1,4 @@
 ﻿using System.Net.Sockets;
-using System.Text;
 
 namespace Client
 {
@@ -86,8 +85,6 @@ namespace Client
 
             foreach (var folder in folders)
             {
-                Console.WriteLine(folder);
-
                 var subFolders = Directory.GetDirectories(folder);
 
                 foreach (var subFolder in subFolders)
