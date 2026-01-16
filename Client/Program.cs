@@ -6,9 +6,8 @@ namespace Client
     internal class Program
     {
         const string SERVER = "127.0.0.1";
-        const int    PORT   = 8888;
-        const int    BUFFER_SIZE = 4_096;
-
+        const int PORT = 8888;
+        const int BUFFER_SIZE = 4_096;
 
         static async Task Main(string[] args)
         {
@@ -50,6 +49,7 @@ namespace Client
 
         static async Task<int> ReadFile(string file, NetworkStream stream)
         {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
             Console.WriteLine($"Starting process file: {file}");
 
             var counter = 0;
@@ -64,7 +64,9 @@ namespace Client
                 }
             }
 
-            Console.WriteLine($"Process finished");
+            watch.Stop();
+            Console.WriteLine($"Time taken: {watch.ElapsedMilliseconds / 1000} seconds");
+
             return counter;
         }
 
